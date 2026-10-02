@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import devices as devmod
+from .mixer import sanitize
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class Recorder:
         }
 
     def _on_audio(self, mono: np.ndarray) -> None:
+        mono = sanitize(mono)
         with self._lock:
             self._chunks.append(mono.copy())
             total = sum(c.size for c in self._chunks)

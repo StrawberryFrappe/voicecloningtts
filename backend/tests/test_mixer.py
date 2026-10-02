@@ -73,3 +73,10 @@ def test_resample_and_channels():
     y = resample(x, 24000, 48000)
     assert y.size == 48000 and y.dtype == np.float32
     assert to_channels(y[:10], 2).shape == (10, 2)
+
+
+def test_sanitize_bad_driver_input():
+    from vctts.audio.mixer import sanitize
+
+    x = np.array([np.nan, np.inf, -np.inf, 1e30, -0.5], np.float32)
+    assert np.array_equal(sanitize(x), np.array([0, 1, -1, 1, -0.5], np.float32))

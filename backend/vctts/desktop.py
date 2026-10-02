@@ -33,6 +33,12 @@ def _free_port(preferred: int) -> int:
 
 def _setup_logging() -> None:
     log_file = get_paths().logs / "vctts.log"
+    if sys.stdout is None or sys.stderr is None:
+        # pythonw.exe has no console; libraries that print progress bars (model
+        # downloads) would crash writing to None, so send them to a file.
+        stream = open(get_paths().logs / "console.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or stream
+        sys.stderr = sys.stderr or stream
     handlers: list[logging.Handler] = [logging.FileHandler(log_file, encoding="utf-8")]
     if sys.stderr is not None:
         handlers.append(logging.StreamHandler())

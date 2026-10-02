@@ -208,6 +208,11 @@ class MixCore:
         return out, mon, done, active
 
 
+def sanitize(x: np.ndarray) -> np.ndarray:
+    """Guard against NaN/inf or out-of-range samples from misbehaving drivers."""
+    return np.clip(np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0).astype(np.float32, copy=False)
+
+
 def soft_clip(x: np.ndarray, threshold: float = 0.9) -> np.ndarray:
     """Transparent below ``threshold``, smoothly saturating above (no hard clicks)."""
     y = x.astype(np.float32, copy=True)
@@ -360,7 +365,7 @@ class AudioEngine(AudioSink):
                     self._emit({"type": "speaking", "active": active})
 
             def mic_cb(indata, frames, _time, status):
-                mic_ring.write(indata[:, 0] if indata.ndim > 1 else indata)
+                mic_ring.write(sanitize(indata[:, 0] if indata.ndim > 1 else indata))
 
             def monitor_cb(outdata, frames, _time, status):
                 mon_ring.trim_to(block * 6 + frames)

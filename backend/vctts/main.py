@@ -350,7 +350,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
         if ext not in ALLOWED_UPLOAD_EXT:
             raise HTTPException(400, f"Unsupported file type '{ext}'. Use mp3, mp4, wav, m4a, ogg, flac, webm...")
         uid = new_id()
-        raw = s.paths.uploads / f"{uid}{ext}"
+        raw = s.paths.uploads / f"{uid}.src{ext}"  # never the same path as the decoded .wav
         size = 0
         with raw.open("wb") as f:
             while chunk := await file.read(1024 * 1024):

@@ -103,6 +103,13 @@ def test_voice_lifecycle(client, speech_mp3):
     assert client.get("/api/voices").json()["active_id"] == imp["id"]
 
 
+def test_upload_wav_file(client, speech_wav):
+    with open(speech_wav, "rb") as f:
+        r = client.post("/api/voices/upload", files={"file": ("me.wav", f, "audio/wav")})
+    assert r.status_code == 200, r.text
+    assert 5.5 < r.json()["duration"] < 6.5
+
+
 def test_upload_rejects_bad_type(client):
     r = client.post("/api/voices/upload", files={"file": ("x.exe", b"MZ", "application/octet-stream")})
     assert r.status_code == 400

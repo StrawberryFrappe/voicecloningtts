@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/events.ts","./src/main.tsx","./src/toast.tsx","./src/components/LevelMeter.tsx","./src/components/RecordButton.tsx","./src/components/Waveform.tsx","./src/pages/AudioPage.tsx","./src/pages/ChatPage.tsx","./src/pages/PersonasPage.tsx","./src/pages/SettingsPage.tsx","./src/pages/VoicesPage.tsx","./vite.config.ts"],"version":"5.9.3"}
