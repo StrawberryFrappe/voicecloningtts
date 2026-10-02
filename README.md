@@ -45,7 +45,9 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1
 The script:
 
 1. creates `.venv`,
-2. installs PyTorch 2.6 (CUDA 12.4), the app, Chatterbox, XTTS-v2, faster-whisper and PyAudioWPatch,
+2. installs PyTorch 2.6 (CUDA 12.4), the app, Chatterbox, faster-whisper and PyAudioWPatch,
+   plus XTTS-v2 in a separate `.venv-xtts`, because Chatterbox and coqui-tts need incompatible
+   `transformers` versions. The app runs XTTS as a background worker process.
 3. builds the UI,
 4. checks for VB-Cable,
 5. adds a desktop shortcut.
@@ -111,7 +113,7 @@ ConversationService ─ LLM stream ─► SentenceChunker ─► TTSManager (GPU
 | `backend/vctts/llm/` | `ChatProvider` interface; OpenAI/OpenRouter, Anthropic and Gemini providers; `ToolRegistry` |
 | `backend/vctts/personas.py` | Personas, length presets → system prompt and `max_tokens` |
 | `backend/vctts/conversation.py` | UI-agnostic pipeline: LLM → chunker → TTS → sinks; stop, regenerate, tool loop |
-| `backend/vctts/tts/` | `TTSEngine` interface, Chatterbox and XTTS engines, `TTSManager` worker, sentence chunker |
+| `backend/vctts/tts/` | `TTSEngine` interface, Chatterbox and XTTS engines, `TTSManager` worker, sentence chunker, out-of-process engine worker (`worker.py`/`remote.py`) |
 | `backend/vctts/voices/` | ffmpeg ingest (mp3/mp4 → clean 24 kHz mono), voice library, zip export/import |
 | `backend/vctts/audio/` | WASAPI device discovery, real-time mixer / virtual mic, sinks, recorder (mic + loopback) |
 | `backend/vctts/stt/` | faster-whisper transcription |

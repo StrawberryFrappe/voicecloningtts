@@ -17,14 +17,18 @@ import numpy as np
 from ..voices import Voice, VoiceLibrary
 from .base import Cancelled, CancelToken, TTSEngine, TTSError, VoiceContext
 from .chatterbox_engine import ChatterboxEngine
+from .remote import RemoteXTTSEngine, xtts_python
 from .xtts_engine import XTTSEngine
 
 log = logging.getLogger(__name__)
 
-ENGINE_CLASSES: dict[str, type[TTSEngine]] = {
-    ChatterboxEngine.id: ChatterboxEngine,
-    XTTSEngine.id: XTTSEngine,
-}
+
+def engine_classes() -> dict[str, type[TTSEngine]]:
+    # XTTS can't share an environment with Chatterbox (conflicting
+    # `transformers` pins), so prefer the dedicated .venv-xtts worker when the
+    # setup script created one; otherwise try it in-process.
+    xtts: type[TTSEngine] = RemoteXTTSEngine if xtts_python() else XTTSEngine
+    return {ChatterboxEngine.id: ChatterboxEngine, xtts.id: xtts}
 
 _END = object()
 
@@ -36,7 +40,7 @@ class TTSManager:
         self._options = options or (lambda engine_id: {})
         self._device = None if device in (None, "auto") else device
         self._engines: dict[str, TTSEngine] = {}
-        self._classes: dict[str, type[TTSEngine]] = dict(ENGINE_CLASSES)
+        self._classes: dict[str, type[TTSEngine]] = engine_classes()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-worker")
         self._status: dict[str, str] = {}  # engine_id -> "loading" | "ready" | "error: ..."
 

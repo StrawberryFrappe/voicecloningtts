@@ -56,7 +56,6 @@ if ($LASTEXITCODE -ne 0) { Fail "PyTorch install failed" }
 
 # --- App + engines ------------------------------------------------------------
 $extras = @("desktop", "chatterbox", "loopback")
-if (-not $NoXtts) { $extras += "xtts" }
 if (-not $NoStt) { $extras += "stt" }
 $spec = "backend[" + ($extras -join ",") + "]"
 Step "Installing VoiceCloningTTS ($spec)"
@@ -72,6 +71,28 @@ if (-not $Cpu) {
         $cuda = & $vpy -c "import torch; print(torch.cuda.is_available())"
     }
     Write-Host "CUDA available: $cuda"
+}
+
+# --- XTTS-v2 in its own environment ---------------------------------------------
+# chatterbox-tts and coqui-tts need incompatible `transformers` versions, so XTTS
+# lives in .venv-xtts and the app runs it as a background worker process.
+if (-not $NoXtts) {
+    Step "Installing XTTS-v2 into .venv-xtts"
+    if (-not (Test-Path ".venv-xtts\Scripts\python.exe")) {
+        & $py[0] $py[1] -m venv .venv-xtts
+    }
+    $xpy = Join-Path $Root ".venv-xtts\Scripts\python.exe"
+    & $xpy -m pip install --upgrade pip wheel setuptools
+    if ($Cpu) {
+        & $xpy -m pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+    } else {
+        & $xpy -m pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    }
+    & $xpy -m pip install "coqui-tts==0.27.5" "transformers>=4.57,<5" pydantic
+    if ($LASTEXITCODE -ne 0) { Fail "XTTS install failed (re-run with -NoXtts to skip it)" }
+    & $xpy -m pip install --no-deps -e backend
+    & $xpy -c "from TTS.tts.models.xtts import Xtts; print('XTTS OK')"
+    if ($LASTEXITCODE -ne 0) { Fail "XTTS environment check failed" }
 }
 
 # --- UI -----------------------------------------------------------------------

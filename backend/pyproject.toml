@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "vctts"
 version = "0.1.0"
 description = "LLM chat with voice-cloned TTS and a virtual microphone"
-readme = "../README.md"
 requires-python = ">=3.10,<3.13"
 authors = [{ name = "Jun Zambrano", email = "ln.sz.zambrano@gmail.com" }]
 dependencies = [
@@ -31,8 +30,11 @@ dependencies = [
 desktop = ["pywebview>=5.0"]
 # Voice-cloning engines. torch/torchaudio must be installed first from the
 # PyTorch CUDA index (see scripts/setup_windows.ps1).
+# NOTE: these two can't live in the same environment (chatterbox-tts pins
+# transformers==5.2.0, coqui-tts needs 4.57-4.x). The setup script installs
+# XTTS into its own .venv-xtts and the app talks to it via vctts.tts.worker.
 chatterbox = ["chatterbox-tts==0.1.7"]
-xtts = ["coqui-tts[codec]>=0.27.5"]
+xtts = ["coqui-tts==0.27.5", "transformers>=4.57,<5"]
 # Speech-to-text for the record button.
 stt = ["faster-whisper>=1.1"]
 # WASAPI loopback capture ("what's playing in my headphones") on Windows.
