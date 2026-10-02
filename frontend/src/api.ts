@@ -150,7 +150,40 @@ export interface AppStatus {
   virtual_cable: { installed: boolean; device: string | null; capture_name?: string | null; reason: string };
   stt: { available: boolean; reason: string; device: string | null };
   loopback: { available: boolean; reason: string };
+  vc: VCStatus;
   busy: boolean;
+}
+
+export interface VCSettings {
+  diffusion_steps: number;
+  inference_cfg_rate: number;
+  max_prompt_length: number;
+  block_time: number;
+  crossfade_time: number;
+  extra_time_ce: number;
+  extra_time: number;
+  extra_time_right: number;
+  gate_db: number;
+  hangover_blocks: number;
+}
+
+export interface VCStatus {
+  available: boolean;
+  reason: string;
+  state: "off" | "loading" | "live" | "error";
+  active: boolean;
+  error: string | null;
+  voice_id: string | null;
+  saved_voice_id?: string | null;
+  model_loaded: boolean;
+  settings: VCSettings;
+  device: string;
+  latency_ms: number;
+  infer_ms: number;
+  block_ms: number;
+  load: number;
+  dropped_blocks: number;
+  underruns: number;
 }
 
 export interface Settings {
@@ -293,6 +326,13 @@ export const api = {
   },
   sttModels: () => get<{ models: string[] }>("/api/stt/models"),
   discord: () => get<Record<string, any>>("/api/integrations/discord"),
+
+  vcStatus: () => get<VCStatus>("/api/vc"),
+  vcSettings: (settings: Partial<VCSettings>, voice_id?: string | null) =>
+    put<VCStatus>("/api/vc/settings", { settings, voice_id: voice_id ?? null }),
+  vcStart: (voice_id?: string | null) => post<VCStatus>("/api/vc/start", { voice_id: voice_id ?? null }),
+  vcStop: () => post<VCStatus>("/api/vc/stop"),
+  vcUnload: () => post<VCStatus>("/api/vc/unload"),
 };
 
 export const LANGUAGE_NAMES: Record<string, string> = {

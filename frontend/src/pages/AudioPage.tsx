@@ -3,12 +3,14 @@ import { api, type AudioStatus, type DeviceInfo, type MixerSettings, type Settin
 import { useEvents } from "../events";
 import { errMsg, useToast } from "../toast";
 import LevelMeter from "../components/LevelMeter";
+import VoiceChangerCard from "../components/VoiceChangerCard";
+import type { Voice } from "../api";
 
 interface Devices {
   available: boolean; reason: string; inputs: DeviceInfo[]; outputs: DeviceInfo[]; virtual: DeviceInfo | null;
 }
 
-export default function AudioPage({ onChange }: { onChange: () => void }) {
+export default function AudioPage({ onChange, voices }: { onChange: () => void; voices: Voice[] }) {
   const [devices, setDevices] = useState<Devices | null>(null);
   const [status, setStatus] = useState<AudioStatus | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -125,6 +127,8 @@ export default function AudioPage({ onChange }: { onChange: () => void }) {
         </div>
       </div>
 
+      <VoiceChangerCard voices={voices} audioRunning={status.running} hasMic={!!cfg.input_device} />
+
       <div className="card">
         <h2>Mixer</h2>
         <div className="col" style={{ gap: 6, marginBottom: 14 }}>
@@ -142,7 +146,7 @@ export default function AudioPage({ onChange }: { onChange: () => void }) {
         <div className="row" style={{ marginTop: 10 }}>
           <label className="check"><input type="checkbox" checked={mix.mic_enabled} onChange={(e) => setMix({ mic_enabled: e.target.checked })} />Pass my mic through</label>
           <label className="check"><input type="checkbox" checked={mix.monitor_tts} onChange={(e) => setMix({ monitor_tts: e.target.checked })} />Hear the voice in my headphones</label>
-          <label className="check"><input type="checkbox" checked={mix.monitor_mic} onChange={(e) => setMix({ monitor_mic: e.target.checked })} />Hear my own mic</label>
+          <label className="check"><input type="checkbox" checked={mix.monitor_mic} onChange={(e) => setMix({ monitor_mic: e.target.checked })} />Hear my own mic (converted when the voice changer is on)</label>
         </div>
       </div>
 

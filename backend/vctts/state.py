@@ -17,6 +17,7 @@ from .secrets import SecretStore
 from .storage import Database
 from .stt import WhisperSTT
 from .tts import TTSManager
+from .vc import StreamSettings, VCError, VoiceChanger
 from .voices import VoiceLibrary
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,10 @@ class AppState:
         self.audio = AudioEngine(on_event=self._audio_event)
         self.audio.config = EngineConfig.from_dict(self.db.get_setting("audio_config"))
         self.audio.update_settings(MixerSettings.from_dict(self.db.get_setting("mixer_settings")))
+        self.vc = VoiceChanger(on_event=self._audio_event)
+        self.vc.settings = StreamSettings.from_dict(self.db.get_setting("vc_settings"))
+        self.vc.device = self.setting("tts_device") or "auto"
+        self.audio.voice_changer = self.vc
         self.recorder = Recorder()
         self.stt = WhisperSTT(self.setting("stt_model"), self.setting("stt_device"))
         self.sinks = SinkRouter()
@@ -73,6 +78,7 @@ class AppState:
                 self.db.set_setting(k, v)
         if "tts_device" in values:
             self.tts.set_device(values["tts_device"])
+            self.vc.device = values["tts_device"] or "auto"
         if "stt_model" in values or "stt_device" in values:
             self.stt.configure(values.get("stt_model"), values.get("stt_device"))
             self.stt.unload()
@@ -105,9 +111,24 @@ class AppState:
             pass
         if self.recorder.active:
             self.recorder.cancel()
+        self.vc.shutdown()
         self.audio.shutdown()
         self.tts.shutdown()
         self.db.close()
+
+    # -- voice changer -----------------------------------------------------
+    def start_voice_changer(self, voice_id: str | None = None) -> dict:
+        if not self.audio.running:
+            raise VCError("Start the virtual mic first (Virtual mic page).")
+        if not self.audio.config.input_device:
+            raise VCError("Choose your microphone on the Virtual mic page first.")
+        vid = voice_id or self.db.get_setting("vc_voice_id") or self.db.get_setting("active_voice_id")
+        voice = self.voices.get(vid)
+        if voice is None:
+            raise VCError("Choose a voice for the voice changer.")
+        self.db.set_setting("vc_voice_id", voice.id)
+        self.vc.start(self.voices.reference_path(voice.id), voice.id, self.audio.config.sample_rate)
+        return self.vc.status()
 
     def _audio_event(self, event: dict) -> None:
         loop = self.loop

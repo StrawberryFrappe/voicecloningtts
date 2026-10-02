@@ -14,6 +14,9 @@ frontend/node_modules/
 frontend/dist/
 backend/vctts/static/
 
+# Third-party code downloaded by the setup script
+vendor/
+
 # Local data / secrets
 .env
 *.sqlite3

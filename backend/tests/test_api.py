@@ -176,3 +176,18 @@ def test_discord_scaffold_status(client):
 
 def test_tools_endpoint_empty(client):
     assert client.get("/api/tools").json() == []
+
+
+def test_voice_changer_api(client, speech_mp3, monkeypatch):
+    monkeypatch.setenv("VCTTS_VC_FAKE", "1")
+    st = client.get("/api/vc").json()
+    assert st["state"] == "off" and "settings" in st
+    v = make_voice(client, speech_mp3)
+    r = client.put("/api/vc/settings", json={"settings": {"diffusion_steps": 6, "block_time": 0.2}, "voice_id": v["id"]})
+    assert r.json()["settings"]["diffusion_steps"] == 6 and r.json()["saved_voice_id"] == v["id"]
+    assert client.get("/api/settings").status_code == 200
+    # needs the virtual mic running with a microphone
+    r = client.post("/api/vc/start", json={"voice_id": v["id"]})
+    assert r.status_code == 400 and "virtual mic" in r.json()["detail"].lower()
+    assert client.post("/api/vc/stop").json()["state"] == "off"
+    assert "vc" in client.get("/api/status").json()

@@ -261,6 +261,9 @@ class AudioEngine(AudioSink):
         self._lock = threading.RLock()
         self._was_active = False
         self.last_error: str | None = None
+        # Optional real-time voice changer (vctts.vc.VoiceChanger). When active,
+        # its converted output replaces the dry microphone signal.
+        self.voice_changer = None
         self._status_flags = 0
 
     # -- AudioSink -------------------------------------------------------
@@ -351,6 +354,9 @@ class AudioEngine(AudioSink):
                 if in_dev is not None:
                     mic_ring.trim_to(max_mic_backlog + frames)
                     mic = mic_ring.read(frames)
+                    vc = self.voice_changer
+                    if vc is not None and vc.active:
+                        mic = vc.read(frames)
                 out, mon, done, active = core.process(mic, frames)
                 if master_is_monitor:
                     outdata[:] = to_channels(mon, outdata.shape[1])
@@ -365,7 +371,11 @@ class AudioEngine(AudioSink):
                     self._emit({"type": "speaking", "active": active})
 
             def mic_cb(indata, frames, _time, status):
-                mic_ring.write(sanitize(indata[:, 0] if indata.ndim > 1 else indata))
+                mono = sanitize(indata[:, 0] if indata.ndim > 1 else indata)
+                mic_ring.write(mono)
+                vc = self.voice_changer
+                if vc is not None and vc.active:
+                    vc.feed(mono)
 
             def monitor_cb(outdata, frames, _time, status):
                 mon_ring.trim_to(block * 6 + frames)

@@ -30,6 +30,7 @@ from .state import AppState
 from .storage import new_id
 from .stt import MODEL_SIZES, STTError
 from .tts import CancelToken, TTSError
+from .vc import StreamSettings, VCError
 from .voices import IngestError, extract_audio, waveform_peaks
 from .voices.ingest import load_mono
 
@@ -157,6 +158,10 @@ def create_app(state: AppState | None = None) -> FastAPI:
     async def _tts_err(_r, e: TTSError):
         return JSONResponse({"detail": str(e)}, status_code=400)
 
+    @app.exception_handler(VCError)
+    async def _vc_err(_r, e: VCError):
+        return JSONResponse({"detail": str(e)}, status_code=400)
+
     @app.exception_handler(IngestError)
     async def _ingest_err(_r, e: IngestError):
         return JSONResponse({"detail": str(e)}, status_code=400)
@@ -178,6 +183,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
             {"installed": False, "device": None, "reason": audio_reason},
             "stt": {"available": stt_ok, "reason": stt_reason, "device": s.stt.last_device},
             "loopback": {"available": loop_ok, "reason": loop_reason},
+            "vc": s.vc.status(),
             "busy": s.conversations.busy(),
         }
 
@@ -506,10 +512,16 @@ def create_app(state: AppState | None = None) -> FastAPI:
         was_running = s.audio.running
         s.audio.config = cfg
         if was_running:
+            vc_was_active = s.vc.active
             try:
                 await asyncio.to_thread(s.audio.start, cfg)
             except Exception as e:
                 raise HTTPException(400, str(e))
+            if vc_was_active:
+                try:
+                    await asyncio.to_thread(s.start_voice_changer, s.vc.voice_id)
+                except VCError:
+                    pass
         return s.audio.status()
 
     @app.put("/api/audio/mixer")
@@ -532,6 +544,8 @@ def create_app(state: AppState | None = None) -> FastAPI:
     @app.post("/api/audio/stop")
     async def audio_stop():
         s = S()
+        if s.vc.active:
+            await asyncio.to_thread(s.vc.stop)
         await asyncio.to_thread(s.audio.shutdown)
         return s.audio.status()
 
@@ -543,6 +557,44 @@ def create_app(state: AppState | None = None) -> FastAPI:
         tone = (0.25 * np.sin(2 * np.pi * 440 * t) * np.minimum(1, np.minimum(t, t[::-1]) * 20)).astype(np.float32)
         s.sinks.play(tone, sr, f"tone:{new_id()}")
         return {"ok": True, "sinks": [x.name for x in s.sinks.active()]}
+
+    # -- real-time voice changer ----------------------------------------------
+    @app.get("/api/vc")
+    async def vc_status():
+        s = S()
+        return {**s.vc.status(), "saved_voice_id": s.db.get_setting("vc_voice_id")}
+
+    @app.put("/api/vc/settings")
+    async def vc_settings(body: dict = Body(...)):
+        s = S()
+        settings = StreamSettings.from_dict({**s.vc.settings.to_dict(), **(body.get("settings") or {})})
+        s.db.set_setting("vc_settings", settings.to_dict())
+        if body.get("voice_id"):
+            if s.voices.get(body["voice_id"]) is None:
+                raise HTTPException(404, "Voice not found")
+            s.db.set_setting("vc_voice_id", body["voice_id"])
+        was_active = s.vc.active
+        s.vc.settings = settings
+        if was_active:  # apply by reconfiguring (model stays loaded)
+            await asyncio.to_thread(s.start_voice_changer, body.get("voice_id") or s.vc.voice_id)
+        return {**s.vc.status(), "saved_voice_id": s.db.get_setting("vc_voice_id")}
+
+    @app.post("/api/vc/start")
+    async def vc_start(body: dict | None = Body(None)):
+        s = S()
+        return await asyncio.to_thread(s.start_voice_changer, (body or {}).get("voice_id"))
+
+    @app.post("/api/vc/stop")
+    async def vc_stop():
+        s = S()
+        await asyncio.to_thread(s.vc.stop)
+        return s.vc.status()
+
+    @app.post("/api/vc/unload")
+    async def vc_unload():
+        s = S()
+        await asyncio.to_thread(s.vc.stop, False)
+        return s.vc.status()
 
     # -- recording / speech-to-text -----------------------------------------
     @app.post("/api/record/start")

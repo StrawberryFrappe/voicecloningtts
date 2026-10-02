@@ -8,11 +8,13 @@
       -Cpu          install CPU-only PyTorch (no NVIDIA GPU)
       -NoXtts       skip XTTS-v2 (Coqui) engine
       -NoStt        skip speech-to-text (faster-whisper)
+      -NoVc         skip the real-time voice changer (Seed-VC)
 #>
 param(
     [switch]$Cpu,
     [switch]$NoXtts,
-    [switch]$NoStt
+    [switch]$NoStt,
+    [switch]$NoVc
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,6 +95,46 @@ if (-not $NoXtts) {
     & $xpy -m pip install --no-deps -e backend
     & $xpy -c "from TTS.tts.models.xtts import Xtts; print('XTTS OK')"
     if ($LASTEXITCODE -ne 0) { Fail "XTTS environment check failed" }
+}
+
+# --- Real-time voice changer (Seed-VC) in its own environment ---------------------
+# Seed-VC (GPL-3.0) isn't on PyPI: download a pinned snapshot into vendor\seed-vc
+# and give it its own .venv-vc with the versions it was built against.
+if (-not $NoVc) {
+    $SeedCommit = "51383efd921027683c89e5348211d93ff12ac2a8"
+    $SeedDir = Join-Path $Root "vendor\seed-vc"
+    if (-not (Test-Path (Join-Path $SeedDir "modules"))) {
+        Step "Downloading Seed-VC ($($SeedCommit.Substring(0,7)))"
+        New-Item -ItemType Directory -Force -Path (Join-Path $Root "vendor") | Out-Null
+        $zip = Join-Path $env:TEMP "seed-vc.zip"
+        Invoke-WebRequest -Uri "https://github.com/Plachtaa/seed-vc/archive/$SeedCommit.zip" -OutFile $zip
+        $tmp = Join-Path $env:TEMP "seed-vc-extract"
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        Expand-Archive -Path $zip -DestinationPath $tmp
+        if (Test-Path $SeedDir) { Remove-Item -Recurse -Force $SeedDir }
+        Move-Item (Join-Path $tmp "seed-vc-$SeedCommit") $SeedDir
+        Remove-Item -Recurse -Force $tmp, $zip
+    }
+    Step "Installing the voice changer into .venv-vc"
+    if (-not (Test-Path ".venv-vc\Scripts\python.exe")) {
+        & $py[0] $py[1] -m venv .venv-vc
+    }
+    $cpy = Join-Path $Root ".venv-vc\Scripts\python.exe"
+    & $cpy -m pip install --upgrade pip wheel setuptools
+    if ($Cpu) {
+        & $cpy -m pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+    } else {
+        & $cpy -m pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    }
+    & $cpy -m pip install "transformers==4.46.3" "librosa==0.10.2" "munch==4.0.0" "einops==0.8.0" `
+        "descript-audio-codec==1.0.0" "huggingface-hub>=0.28.1" pyyaml soundfile scipy "numpy==1.26.4" pydantic
+    if ($LASTEXITCODE -ne 0) { Fail "Voice changer install failed (re-run with -NoVc to skip it)" }
+    & $cpy -m pip install --no-deps -e backend
+    Push-Location $SeedDir
+    & $cpy -c "from modules.commons import build_model; from modules.hifigan.generator import HiFTGenerator; print('Seed-VC OK')"
+    $ok = $LASTEXITCODE
+    Pop-Location
+    if ($ok -ne 0) { Fail "Voice changer environment check failed" }
 }
 
 # --- UI -----------------------------------------------------------------------
