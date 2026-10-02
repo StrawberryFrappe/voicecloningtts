@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vctts"
+version = "0.1.0"
+description = "LLM chat with voice-cloned TTS and a virtual microphone"
+readme = "../README.md"
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "Jun Zambrano", email = "ln.sz.zambrano@gmail.com" }]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.7",
+    "numpy>=1.24,<2.0",
+    "scipy>=1.11",
+    "soundfile>=0.12",
+    "sounddevice>=0.4.6",
+    "imageio-ffmpeg>=0.5",
+    "keyring>=25",
+    "openai>=1.40",
+    "anthropic>=0.60",
+    "google-genai>=1.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Desktop window (Edge WebView2 on Windows).
+desktop = ["pywebview>=5.0"]
+# Voice-cloning engines. torch/torchaudio must be installed first from the
+# PyTorch CUDA index (see scripts/setup_windows.ps1).
+chatterbox = ["chatterbox-tts==0.1.7"]
+xtts = ["coqui-tts[codec]>=0.27.5"]
+# Speech-to-text for the record button.
+stt = ["faster-whisper>=1.1"]
+# WASAPI loopback capture ("what's playing in my headphones") on Windows.
+loopback = ["PyAudioWPatch>=0.2.12; sys_platform == 'win32'"]
+# Future Discord voice bot (not wired up yet, see vctts/integrations/discord).
+discord = ["discord.py[voice]>=2.4"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+vctts = "vctts.desktop:main"
+vctts-server = "vctts.main:run_server"
+
+[tool.setuptools.packages.find]
+include = ["vctts*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

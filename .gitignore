@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+backend/vctts/static/
+
+# Local data / secrets
+.env
+*.sqlite3
+secrets.json
+data/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
