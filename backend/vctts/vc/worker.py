@@ -74,7 +74,9 @@ class VCWorker:
             if self.model is None:
                 from .seedvc import SeedVCModel
 
-                self.model = SeedVCModel(self.root, device=msg.get("device"))
+                prec = msg.get("precision")
+                self.model = SeedVCModel(self.root, device=msg.get("device"),
+                                         fp16=None if prec in (None, "auto") else prec == "fp16")
                 # VCTTS_VC_RANDOM_INIT=1: build the real architecture without
                 # downloading weights (offline/CI checks of the full pipeline).
                 self.model.load(random_init=bool(msg.get("random_init"))
@@ -90,6 +92,7 @@ class VCWorker:
                     raise RuntimeError("model not loaded")
                 from .seedvc import StreamingConverter
 
+                self.model.set_dit_weights(msg.get("checkpoint"))
                 self.model.set_reference(msg["reference_path"], settings.max_prompt_length)
                 self.conv = StreamingConverter(self.model, sr, settings)
             return {"block_frames": self.conv.block_frames, "latency_ms": round(self.conv.latency_ms, 1)}
@@ -98,6 +101,40 @@ class VCWorker:
                 raise RuntimeError("not configured")
             out = self.conv.process(decode_audio(msg["audio"]))
             return {"audio": encode_audio(out), "infer_ms": round(self.conv.last_infer_ms, 1)}
+        if op == "benchmark":
+            settings = StreamSettings.from_dict(msg.get("settings"))
+            sr = int(msg["sample_rate"])
+            if self.fake:
+                conv = FakeConverter(sr, settings)
+                block_ms = 1000 * conv.block / sr
+                # Pretend inference costs scale with quality, so presets can be compared in tests.
+                infer = float(msg.get("fake_ms_per_step", 10.0)) * settings.diffusion_steps
+                return {"infer_ms": infer, "block_ms": round(block_ms, 1), "load": round(infer / block_ms, 3),
+                        "latency_ms": round(conv.latency_ms, 1)}
+            if self.model is None:
+                raise RuntimeError("model not loaded")
+            from .seedvc import benchmark
+
+            self.model.set_dit_weights(msg.get("checkpoint"))
+            self.model.set_reference(msg["reference_path"], settings.max_prompt_length)
+            return benchmark(self.model, sr, settings, int(msg.get("blocks", 6)))
+        if op == "convert_file":
+            settings = StreamSettings.from_dict(msg.get("settings"))
+            if self.fake:
+                import soundfile as sf
+
+                audio, sr = sf.read(msg["input_path"], dtype="float32")
+                sf.write(msg["output_path"], audio * 0.5, sr)
+                return {"seconds": round(len(audio) / sr, 2)}
+            if self.model is None:
+                raise RuntimeError("model not loaded")
+            from .seedvc import convert_file
+
+            self.model.set_dit_weights(msg.get("checkpoint"))
+            self.model.set_reference(msg["reference_path"], settings.max_prompt_length)
+            secs = convert_file(self.model, msg["input_path"], msg["output_path"], settings)
+            self.conv = None  # the live converter must be reconfigured after this
+            return {"seconds": round(secs, 2)}
         if op == "unload":
             self.model = None
             self.conv = None

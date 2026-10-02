@@ -11,6 +11,7 @@ from .audio.sinks import BrowserSink, SinkRouter
 from .config import Paths, get_paths
 from .conversation import ConversationService
 from .events import EventBus
+from .gpu import GpuBusy, GpuCoordinator, detect, resolve_low_vram, resolve_precision
 from .llm import ProviderRegistry, ToolRegistry
 from .personas import PersonaStore
 from .secrets import SecretStore
@@ -18,6 +19,8 @@ from .storage import Database
 from .stt import WhisperSTT
 from .tts import TTSManager
 from .vc import StreamSettings, VCError, VoiceChanger
+from .vc.changer import preset_settings
+from .vc.training import TrainingManager
 from .voices import VoiceLibrary
 
 log = logging.getLogger(__name__)
@@ -33,6 +36,8 @@ DEFAULT_SETTINGS = {
     "auto_start_audio": True,
     "record_source": "mic",
     "record_device": "",
+    "gpu_memory_mode": "auto",    # auto | low | normal (low = one heavy model on the GPU at a time)
+    "gpu_precision": "auto",      # auto | fp16 | fp32 (auto = fp32 on GTX 16-series / older cards)
 }
 
 
@@ -46,16 +51,31 @@ class AppState:
         self.tools = ToolRegistry()
         self.personas = PersonaStore(self.db)
         self.voices = VoiceLibrary(self.paths.voices)
-        self.tts = TTSManager(self.voices, options=self._engine_options, device=self.setting("tts_device"))
+        self.gpu_info = detect()
+        self.gpu = GpuCoordinator(lambda: self.low_vram)
+        self.tts = TTSManager(self.voices, options=self._engine_options, device=self.setting("tts_device"),
+                              gpu=self.gpu)
         self.audio = AudioEngine(on_event=self._audio_event)
         self.audio.config = EngineConfig.from_dict(self.db.get_setting("audio_config"))
         self.audio.update_settings(MixerSettings.from_dict(self.db.get_setting("mixer_settings")))
         self.vc = VoiceChanger(on_event=self._audio_event)
-        self.vc.settings = StreamSettings.from_dict(self.db.get_setting("vc_settings"))
+        stored_vc = self.db.get_setting("vc_settings")
+        self.vc.settings = (StreamSettings.from_dict(stored_vc) if stored_vc
+                            else preset_settings("low" if self.low_vram else "balanced"))
         self.vc.device = self.setting("tts_device") or "auto"
+        self.vc.precision = self.precision
         self.audio.voice_changer = self.vc
         self.recorder = Recorder()
-        self.stt = WhisperSTT(self.setting("stt_model"), self.setting("stt_device"))
+        self.stt = WhisperSTT(self.setting("stt_model"), self.setting("stt_device"),
+                              low_vram=lambda: self.low_vram, precision=lambda: self.precision)
+        self.training = TrainingManager(self.voices, self.gpu, on_event=self._audio_event,
+                                        precision=lambda: self.precision,
+                                        device=lambda: self.setting("tts_device") or "auto")
+        self._vc_resume: str | None = None
+        self.gpu.register("tts", self.tts.unload_all)
+        self.gpu.register("vc", self._release_vc)
+        self.gpu.register("stt", self.stt.unload)
+        self.gpu.listeners.append(self._audio_event)
         self.sinks = SinkRouter()
         self.sinks.add(self.audio)
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -63,11 +83,25 @@ class AppState:
         self.conversations = ConversationService(
             self.db, self.personas, self.providers, self.tools, self.tts, self.voices, self.sinks, self.bus
         )
+        self.conversations.on_speech_done = self._after_speech
         self._bg: list[asyncio.Task] = []
 
     # -- settings --------------------------------------------------------
     def setting(self, key: str):
         return self.db.get_setting(key, DEFAULT_SETTINGS.get(key))
+
+    @property
+    def low_vram(self) -> bool:
+        return resolve_low_vram(self.setting("gpu_memory_mode"), self.gpu_info)
+
+    @property
+    def precision(self) -> str:
+        return resolve_precision(self.setting("gpu_precision"), self.gpu_info)
+
+    def gpu_status(self) -> dict:
+        return {**self.gpu_info.to_dict(), "low_vram": self.low_vram, "precision": self.precision,
+                "memory_mode": self.setting("gpu_memory_mode"), "precision_pref": self.setting("gpu_precision"),
+                "holders": sorted(self.gpu.holders), "exclusive": self.gpu.exclusive}
 
     def all_settings(self) -> dict:
         return {k: self.setting(k) for k in DEFAULT_SETTINGS}
@@ -79,6 +113,11 @@ class AppState:
         if "tts_device" in values:
             self.tts.set_device(values["tts_device"])
             self.vc.device = values["tts_device"] or "auto"
+        if "gpu_precision" in values:
+            self.vc.precision = self.precision
+            self.vc.stop(keep_model=False)  # reload with the new precision next time
+            self.gpu.release("vc")
+            self.stt.unload()
         if "stt_model" in values or "stt_device" in values:
             self.stt.configure(values.get("stt_model"), values.get("stt_device"))
             self.stt.unload()
@@ -111,6 +150,7 @@ class AppState:
             pass
         if self.recorder.active:
             self.recorder.cancel()
+        self.training.shutdown()
         self.vc.shutdown()
         self.audio.shutdown()
         self.tts.shutdown()
@@ -126,9 +166,40 @@ class AppState:
         voice = self.voices.get(vid)
         if voice is None:
             raise VCError("Choose a voice for the voice changer.")
+        if self.low_vram and self.conversations.speaking:
+            raise VCError("Wait for the voice to finish speaking (low-VRAM mode swaps models).")
+        self.claim_gpu("vc")
         self.db.set_setting("vc_voice_id", voice.id)
-        self.vc.start(self.voices.reference_path(voice.id), voice.id, self.audio.config.sample_rate)
+        self.vc.precision = self.precision
+        self.vc.start(self.voices.reference_path(voice.id), voice.id, self.audio.config.sample_rate,
+                      checkpoint=self.voices.active_finetune(voice.id))
+        self._vc_resume = None
         return self.vc.status()
+
+    def claim_gpu(self, feature: str) -> None:
+        try:
+            self.gpu.acquire(feature)
+        except GpuBusy as e:
+            raise VCError(str(e)) from e
+
+    def _release_vc(self) -> None:
+        """GPU eviction callback: free the voice changer's VRAM (resume later if it was live)."""
+        was_live = self.vc.active
+        voice_id = self.vc.voice_id
+        self.vc.stop(keep_model=False)
+        if was_live and self.gpu.exclusive != "train" and self.training.running is False:
+            self._vc_resume = voice_id
+            log.info("low-VRAM: voice changer paused for TTS; will resume after speech")
+
+    async def _after_speech(self) -> None:
+        """Low-VRAM mode: bring the voice changer back once a spoken reply is done."""
+        vid, self._vc_resume = self._vc_resume, None
+        if not vid or not self.audio.running or self.training.running:
+            return
+        try:
+            await asyncio.to_thread(self.start_voice_changer, vid)
+        except VCError as e:
+            log.warning("could not resume voice changer: %s", e)
 
     def _audio_event(self, event: dict) -> None:
         loop = self.loop

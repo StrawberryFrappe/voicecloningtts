@@ -102,6 +102,8 @@ class ConversationService:
         self.bus = bus
         self._turns: dict[str, Turn] = {}
         self._speech_lock = asyncio.Lock()
+        # Called after each spoken turn (low-VRAM mode resumes the voice changer).
+        self.on_speech_done = None
 
     # -- settings helpers ------------------------------------------------
     @property
@@ -115,6 +117,10 @@ class ConversationService:
         await self.bus.publish(event)
 
     # -- public API ------------------------------------------------------
+    @property
+    def speaking(self) -> bool:
+        return self._speech_lock.locked()
+
     def busy(self) -> bool:
         return any(t.task and not t.task.done() for t in self._turns.values())
 
@@ -308,6 +314,21 @@ class ConversationService:
 
     async def _speak(self, turn: Turn, queue: asyncio.Queue, voice: Voice, language: str | None) -> None:
         """Synthesize queued text chunks in order and push audio to the sinks."""
+        try:
+            await self._speak_locked(turn, queue, voice, language)
+        finally:
+            # Runs even when speech is interrupted; as its own task so a cancelled
+            # turn can't cancel the follow-up (low-VRAM mode resumes the voice changer).
+            if self.on_speech_done is not None:
+                asyncio.ensure_future(self._run_speech_done())
+
+    async def _run_speech_done(self) -> None:
+        try:
+            await self.on_speech_done()
+        except Exception:
+            log.exception("on_speech_done failed")
+
+    async def _speak_locked(self, turn: Turn, queue: asyncio.Queue, voice: Voice, language: str | None) -> None:
         idx = 0
         async with self._speech_lock:
             await self._emit({"type": "tts_start", "turn_id": turn.id, "voice_id": voice.id})

@@ -30,7 +30,9 @@ from .state import AppState
 from .storage import new_id
 from .stt import MODEL_SIZES, STTError
 from .tts import CancelToken, TTSError
+from .gpu import GpuBusy
 from .vc import StreamSettings, VCError
+from .vc.changer import PRESETS, autotune, preset_settings
 from .voices import IngestError, extract_audio, waveform_peaks
 from .voices.ingest import load_mono
 
@@ -91,6 +93,16 @@ class UpdateVoiceBody(BaseModel):
     engine: str | None = None
     engine_settings: dict[str, dict[str, Any]] | None = None
     notes: str | None = None
+    vc_use_finetune: bool | None = None
+
+
+class FinetuneBody(BaseModel):
+    steps: int | None = None
+    batch_size: int | None = None
+
+
+class CompareBody(BaseModel):
+    recording_id: str
 
 
 class PreviewBody(BaseModel):
@@ -162,6 +174,10 @@ def create_app(state: AppState | None = None) -> FastAPI:
     async def _vc_err(_r, e: VCError):
         return JSONResponse({"detail": str(e)}, status_code=400)
 
+    @app.exception_handler(GpuBusy)
+    async def _gpu_err(_r, e: GpuBusy):
+        return JSONResponse({"detail": str(e)}, status_code=409)
+
     @app.exception_handler(IngestError)
     async def _ingest_err(_r, e: IngestError):
         return JSONResponse({"detail": str(e)}, status_code=400)
@@ -184,6 +200,8 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "stt": {"available": stt_ok, "reason": stt_reason, "device": s.stt.last_device},
             "loopback": {"available": loop_ok, "reason": loop_reason},
             "vc": s.vc.status(),
+            "gpu": s.gpu_status(),
+            "training": s.training.status(),
             "busy": s.conversations.busy(),
         }
 
@@ -407,6 +425,8 @@ def create_app(state: AppState | None = None) -> FastAPI:
             raise HTTPException(404, "Voice not found")
         if body.language is not None or body.engine is not None:
             s.tts.forget_voice(vid)
+        if body.vc_use_finetune is not None and s.vc.active and s.vc.voice_id == vid:
+            await asyncio.to_thread(s.start_voice_changer, vid)  # apply to the live changer
         return v.model_dump()
 
     @app.delete("/api/voices/{vid}")
@@ -594,7 +614,154 @@ def create_app(state: AppState | None = None) -> FastAPI:
     async def vc_unload():
         s = S()
         await asyncio.to_thread(s.vc.stop, False)
+        s.gpu.release("vc")
         return s.vc.status()
+
+    @app.get("/api/vc/presets")
+    async def vc_presets():
+        s = S()
+        out = {}
+        for name, p in PRESETS.items():
+            st = preset_settings(name, s.vc.settings)
+            out[name] = {"label": p["label"], "settings": st.to_dict(),
+                         "latency_ms": round(1000 * (2 * st.block_time + st.extra_time_right))}
+        return {"presets": out, "recommended": "low" if s.low_vram else "balanced"}
+
+    def _vc_reference(s: AppState, voice_id: str | None):
+        vid = voice_id or s.vc.voice_id or s.db.get_setting("vc_voice_id") or s.db.get_setting("active_voice_id")
+        voice = s.voices.get(vid)
+        if voice is None:
+            raise HTTPException(400, "Create or choose a voice first.")
+        return voice, s.voices.reference_path(voice.id), s.voices.active_finetune(voice.id)
+
+    @app.post("/api/vc/benchmark")
+    async def vc_benchmark(body: dict | None = Body(None)):
+        s = S()
+        body = body or {}
+        voice, ref, ckpt = _vc_reference(s, body.get("voice_id"))
+        settings = StreamSettings.from_dict({**s.vc.settings.to_dict(), **(body.get("settings") or {})})
+        s.vc.precision = s.precision
+
+        def run():
+            s.claim_gpu("vc")
+            return s.vc.benchmark(ref, s.audio.config.sample_rate, settings, ckpt)
+
+        return await asyncio.to_thread(run)
+
+    @app.post("/api/vc/autotune")
+    async def vc_autotune(body: dict | None = Body(None)):
+        """Measure presets best-first on this GPU and keep the best one that keeps up."""
+        s = S()
+        body = body or {}
+        voice, ref, ckpt = _vc_reference(s, body.get("voice_id"))
+        s.vc.precision = s.precision
+        extra = {k: v for k, v in body.items() if k == "fake_ms_per_step"}
+
+        def run():
+            s.claim_gpu("vc")
+            return autotune(lambda st: s.vc.benchmark(ref, s.audio.config.sample_rate, st, ckpt, **extra),
+                            s.vc.settings)
+
+        result = await asyncio.to_thread(run)
+        s.vc.settings = StreamSettings.from_dict(result["settings"])
+        s.db.set_setting("vc_settings", s.vc.settings.to_dict())
+        return {**result, "status": {**s.vc.status(), "saved_voice_id": s.db.get_setting("vc_voice_id")}}
+
+    # -- voice-changer fine-tuning -------------------------------------------
+    @app.get("/api/voices/{vid}/training")
+    async def training_clips(vid: str):
+        s = S()
+        if s.voices.get(vid) is None:
+            raise HTTPException(404, "Voice not found")
+        clips = s.voices.list_training(vid)
+        return {"clips": clips, "seconds": round(sum(c["seconds"] for c in clips), 1)}
+
+    @app.post("/api/voices/{vid}/training")
+    async def add_training(vid: str, body: dict = Body(...)):
+        s = S()
+        src = _upload_path(s, str(body.get("upload_id", "")))
+        try:
+            clips = await asyncio.to_thread(s.voices.add_training_audio, vid, src)
+        except KeyError:
+            raise HTTPException(404, "Voice not found")
+        return {"clips": clips, "seconds": round(sum(c["seconds"] for c in clips), 1)}
+
+    @app.delete("/api/voices/{vid}/training/{name}")
+    async def delete_training(vid: str, name: str):
+        s = S()
+        try:
+            s.voices.delete_training_clip(vid, name)
+        except KeyError:
+            raise HTTPException(400, "Can't delete that clip")
+        clips = s.voices.list_training(vid)
+        return {"clips": clips, "seconds": round(sum(c["seconds"] for c in clips), 1)}
+
+    @app.post("/api/voices/{vid}/finetune")
+    async def start_finetune(vid: str, body: FinetuneBody | None = None):
+        s = S()
+        body = body or FinetuneBody()
+        if s.vc.active:
+            await asyncio.to_thread(s.vc.stop)
+        return await asyncio.to_thread(s.training.start, vid, body.steps, body.batch_size)
+
+    @app.delete("/api/voices/{vid}/finetune")
+    async def delete_finetune(vid: str):
+        s = S()
+        if s.training.running and s.training.status().get("voice_id") == vid:
+            raise HTTPException(409, "This voice is being fine-tuned right now.")
+        try:
+            v = s.voices.set_finetune(vid, None)
+        except KeyError:
+            raise HTTPException(404, "Voice not found")
+        if s.vc.active and s.vc.voice_id == vid:
+            await asyncio.to_thread(s.start_voice_changer, vid)
+        return v.model_dump()
+
+    @app.get("/api/vc/train")
+    async def training_status():
+        return S().training.status()
+
+    @app.post("/api/vc/train/cancel")
+    async def training_cancel():
+        return await asyncio.to_thread(S().training.cancel)
+
+    @app.post("/api/voices/{vid}/finetune/compare")
+    async def compare_finetune(vid: str, body: CompareBody):
+        """Convert one of your recordings with the base model and with the fine-tune."""
+        s = S()
+        voice = s.voices.get(vid)
+        if voice is None:
+            raise HTTPException(404, "Voice not found")
+        ckpt = s.voices.finetune_path(vid)
+        if not voice.vc_finetune or not ckpt.exists():
+            raise HTTPException(400, "This voice has no fine-tune yet.")
+        if not body.recording_id.isalnum():
+            raise HTTPException(400, "Bad recording id")
+        rec = s.paths.recordings / f"{body.recording_id}.wav"
+        if not rec.exists():
+            raise HTTPException(404, "Recording not found")
+        if s.vc.active:
+            raise HTTPException(409, "Stop the voice changer to run a comparison.")
+        ref = s.voices.reference_path(vid)
+        out_base = s.paths.recordings / f"{body.recording_id}_base.wav"
+        out_ft = s.paths.recordings / f"{body.recording_id}_ft.wav"
+
+        def run():
+            s.claim_gpu("vc")
+            s.vc.precision = s.precision
+            s.vc.convert_file(ref, rec, out_base, None)
+            s.vc.convert_file(ref, rec, out_ft, ckpt)
+
+        await asyncio.to_thread(run)
+        import base64
+
+        return {"base_wav_b64": base64.b64encode(out_base.read_bytes()).decode("ascii"),
+                "finetuned_wav_b64": base64.b64encode(out_ft.read_bytes()).decode("ascii")}
+
+    # -- GPU -------------------------------------------------------------------
+    @app.get("/api/gpu")
+    async def gpu_status():
+        return S().gpu_status()
 
     # -- recording / speech-to-text -----------------------------------------
     @app.post("/api/record/start")
@@ -718,6 +885,11 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
 async def _transcribe(s: AppState, audio: np.ndarray, sr: int, language: str | None) -> dict:
     lang = language if language is not None else (s.setting("stt_language") or None)
+    if s.stt.uses_gpu():
+        try:
+            await asyncio.to_thread(s.gpu.acquire, "stt")
+        except GpuBusy as e:
+            raise HTTPException(409, str(e))
     try:
         return await asyncio.to_thread(s.stt.transcribe, audio, sr, lang)
     except STTError as e:

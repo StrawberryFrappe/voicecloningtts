@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -39,9 +40,14 @@ def _add_torch_dll_dirs() -> None:  # pragma: no cover - Windows only
 
 
 class WhisperSTT:
-    def __init__(self, model_size: str | None = None, device: str | None = None):
+    def __init__(self, model_size: str | None = None, device: str | None = None,
+                 low_vram: Callable[[], bool] | None = None, precision: Callable[[], str] | None = None):
         self.model_size = model_size or "auto"
         self.device_pref = device or "auto"
+        # Low-VRAM mode keeps Whisper on the CPU so the GPU stays free for TTS /
+        # the voice changer; fp32 avoids half precision on GTX 16-series cards.
+        self._low_vram = low_vram or (lambda: False)
+        self._precision = precision or (lambda: "fp16")
         self._model = None
         self._loaded_key: tuple[str, str] | None = None
         self._lock = threading.Lock()
@@ -58,6 +64,8 @@ class WhisperSTT:
         if device == "auto":
             device = "cpu"
             try:
+                if self._low_vram():
+                    raise RuntimeError("low-VRAM mode: Whisper stays on the CPU")
                 import ctranslate2
 
                 if ctranslate2.get_cuda_device_count() > 0:
@@ -67,8 +75,14 @@ class WhisperSTT:
         size = self.model_size
         if size == "auto":
             size = "large-v3-turbo" if device == "cuda" else "small"
-        compute = "float16" if device == "cuda" else "int8"
+        if device == "cuda":
+            compute = "float16" if self._precision() == "fp16" else "int8_float32"
+        else:
+            compute = "int8"
         return size, device, compute
+
+    def uses_gpu(self) -> bool:
+        return self._resolve()[1] == "cuda"
 
     def configure(self, model_size: str | None = None, device: str | None = None) -> None:
         with self._lock:
@@ -93,9 +107,13 @@ class WhisperSTT:
         except Exception as e:
             if device != "cuda":
                 raise STTError(f"Failed to load Whisper: {e}") from e
-            log.warning("Whisper on CUDA failed (%s); falling back to CPU", e)
-            device, compute = "cpu", "int8"
-            self._model = WhisperModel(size, device=device, compute_type=compute)
+            log.warning("Whisper on CUDA (%s) failed (%s); falling back", compute, e)
+            try:
+                compute = "float32"
+                self._model = WhisperModel(size, device=device, compute_type=compute)
+            except Exception:
+                device, compute = "cpu", "int8"
+                self._model = WhisperModel(size, device=device, compute_type=compute)
         self._loaded_key = (size, device)
         self.last_device = device
         return self._model

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type AppStatus, type Provider, type Settings } from "../api";
+import { api, type AppStatus, type GpuStatus, type Provider, type Settings } from "../api";
 import { errMsg, useToast } from "../toast";
 
 const KEY_LINKS: Record<string, string> = {
@@ -14,10 +14,12 @@ export default function SettingsPage({ status, onChange }: { status: AppStatus |
   const [settings, setSettings] = useState<Settings | null>(null);
   const [sttModels, setSttModels] = useState<string[]>(["auto"]);
   const [discord, setDiscord] = useState<Record<string, any> | null>(null);
+  const [gpu, setGpu] = useState<GpuStatus | null>(null);
   const toast = useToast();
 
   async function load() {
-    const [p, s, m, d] = await Promise.all([api.providers(), api.settings(), api.sttModels(), api.discord()]);
+    const [p, s, m, d, g] = await Promise.all([api.providers(), api.settings(), api.sttModels(), api.discord(), api.gpu()]);
+    setGpu(g);
     setProviders(p);
     setSettings(s);
     setSttModels(m.models);
@@ -32,6 +34,7 @@ export default function SettingsPage({ status, onChange }: { status: AppStatus |
   const save = async (patch: Partial<Settings>) => {
     try {
       setSettings(await api.saveSettings(patch));
+      setGpu(await api.gpu());
       onChange();
     } catch (e) {
       toast(errMsg(e), "error");
@@ -47,6 +50,42 @@ export default function SettingsPage({ status, onChange }: { status: AppStatus |
         <p className="small muted">Keys are stored in {status?.secrets_backend === "file" ? "a local file in the app data folder" : "the Windows Credential Manager"} and never shown again.</p>
         {providers.map((p) => <KeyRow key={p.id} p={p} onChange={load} />)}
       </div>
+
+      {gpu && (
+        <div className="card">
+          <h2>GPU</h2>
+          {gpu.cuda ? (
+            <div className="kv">
+              <div>Detected</div><div>{gpu.name} · {gpu.vram_gb} GB VRAM · compute {gpu.cc}</div>
+              <div>Memory mode</div>
+              <div>{gpu.low_vram
+                ? "Low-VRAM: one heavy model on the GPU at a time (TTS, voice changer and fine-tuning take turns)"
+                : "Normal: models stay loaded side by side"}</div>
+              <div>Precision</div>
+              <div>{gpu.precision}{gpu.precision === "fp32" && gpu.name.toUpperCase().includes("GTX 16") ? " (GTX 16-series cards glitch in fp16)" : ""}</div>
+              <div>On the GPU now</div><div>{gpu.holders.length ? gpu.holders.join(", ") : "nothing"}{gpu.exclusive ? ` (${gpu.exclusive} has it exclusively)` : ""}</div>
+            </div>
+          ) : (
+            <p className="small warn-text">No CUDA GPU detected. Everything runs on the CPU (slow; the voice changer won't be real-time).</p>
+          )}
+          <div className="grid2" style={{ marginTop: 12 }}>
+            <label className="field">GPU memory mode
+              <select value={settings.gpu_memory_mode} onChange={(e) => save({ gpu_memory_mode: e.target.value as Settings["gpu_memory_mode"] })}>
+                <option value="auto">Auto (low-VRAM under 6 GB)</option>
+                <option value="low">Low-VRAM (4 GB cards like GTX 1650)</option>
+                <option value="normal">Normal (8 GB+)</option>
+              </select>
+            </label>
+            <label className="field">Precision
+              <select value={settings.gpu_precision} onChange={(e) => save({ gpu_precision: e.target.value as Settings["gpu_precision"] })}>
+                <option value="auto">Auto (fp32 on GTX 16-series / older)</option>
+                <option value="fp32">fp32 (safest)</option>
+                <option value="fp16">fp16 (faster on RTX cards)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h2>Voice engines</h2>

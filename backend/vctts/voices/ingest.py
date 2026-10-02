@@ -144,3 +144,49 @@ def make_reference(
             f"Clip is {duration:.1f}s; {RECOMMENDED_MIN:.0f}-{RECOMMENDED_MAX:.0f}s of clean speech clones better."
         )
     return {"duration": round(duration, 2), "sample_rate": sr, "warnings": warnings}
+
+
+def split_on_silence(audio: np.ndarray, sr: int, min_s: float = 3.0, max_s: float = 12.0,
+                     threshold_db: float = -40.0, min_gap_s: float = 0.25) -> list[np.ndarray]:
+    """Cut a long recording into 3-12 s utterances at pauses (fine-tuning clips).
+
+    Short clips bound training memory on 4 GB GPUs; cutting at pauses avoids
+    chopping words. Stretches without a pause are hard-cut at ``max_s``.
+    """
+    frame = max(1, int(sr * 0.02))
+    n = audio.size // frame
+    if n == 0:
+        return []
+    rms = np.sqrt(np.mean(audio[: n * frame].reshape(n, frame) ** 2, axis=1) + 1e-12)
+    silent = 20 * np.log10(rms + 1e-12) < threshold_db
+    # Cut points: middles of silent runs at least min_gap_s long.
+    cuts = [0]
+    run_start = None
+    min_gap = int(min_gap_s / 0.02)
+    for i, s in enumerate(np.append(silent, False)):
+        if s and run_start is None:
+            run_start = i
+        elif not s and run_start is not None:
+            if i - run_start >= min_gap:
+                cuts.append(((run_start + i) // 2) * frame)
+            run_start = None
+    cuts.append(audio.size)
+    max_len, min_len = int(max_s * sr), int(min_s * sr)
+    segments: list[np.ndarray] = []
+    start = cuts[0]
+    for i in range(1, len(cuts)):
+        end = cuts[i]
+        # Close the current segment if extending it to `end` would exceed max_s.
+        if end - start > max_len and cuts[i - 1] > start:
+            segments.append(audio[start:cuts[i - 1]])
+            start = cuts[i - 1]
+        while end - start > max_len:  # no pause for a long time: hard cut
+            segments.append(audio[start:start + max_len])
+            start += max_len
+    segments.append(audio[start:])
+    out = []
+    for seg in segments:
+        seg = trim_silence(seg, sr)
+        if seg.size >= min_len and np.sqrt(np.mean(seg ** 2)) > 1e-4:
+            out.append(normalize(seg))
+    return out

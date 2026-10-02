@@ -131,7 +131,7 @@ if (-not $NoVc) {
     if ($LASTEXITCODE -ne 0) { Fail "Voice changer install failed (re-run with -NoVc to skip it)" }
     & $cpy -m pip install --no-deps -e backend
     Push-Location $SeedDir
-    & $cpy -c "from modules.commons import build_model; from modules.hifigan.generator import HiFTGenerator; print('Seed-VC OK')"
+    & $cpy -c "from modules.commons import build_model; from modules.hifigan.generator import HiFTGenerator; import train; print('Seed-VC OK')"
     $ok = $LASTEXITCODE
     Pop-Location
     if ($ok -ne 0) { Fail "Voice changer environment check failed" }

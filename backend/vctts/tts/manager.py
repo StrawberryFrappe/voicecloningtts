@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncIterator, Callable
 
 import numpy as np
 
+from ..gpu import GpuBusy, GpuCoordinator
 from ..voices import Voice, VoiceLibrary
 from .base import Cancelled, CancelToken, TTSEngine, TTSError, VoiceContext
 from .chatterbox_engine import ChatterboxEngine
@@ -35,8 +37,9 @@ _END = object()
 
 class TTSManager:
     def __init__(self, voices: VoiceLibrary, options: Callable[[str], dict] | None = None,
-                 device: str | None = None):
+                 device: str | None = None, gpu: GpuCoordinator | None = None):
         self.voices = voices
+        self.gpu = gpu
         self._options = options or (lambda engine_id: {})
         self._device = None if device in (None, "auto") else device
         self._engines: dict[str, TTSEngine] = {}
@@ -113,6 +116,39 @@ class TTSManager:
             if forget:
                 forget(voice_id)
 
+    # -- GPU budget ------------------------------------------------------
+    async def _claim_gpu(self) -> None:
+        """Take the GPU for TTS (low-VRAM mode evicts the voice changer / Whisper)."""
+        if self.gpu is None or "tts" in self.gpu.holders and not self.gpu.exclusive:
+            return
+        try:
+            await asyncio.to_thread(self.gpu.acquire, "tts")
+        except GpuBusy as e:
+            raise TTSError(str(e)) from e
+
+    def _single_engine(self, keep: TTSEngine) -> None:
+        """Low-VRAM mode: only one TTS engine resident (runs on the worker thread)."""
+        if self.gpu is None or not self.gpu.low_vram:
+            return
+        for eng in self._engines.values():
+            if eng is not keep and eng.loaded:
+                log.info("low-VRAM: unloading %s to make room for %s", eng.id, keep.id)
+                eng.unload()
+                self._status[eng.id] = "idle"
+
+    def _unload_all_now(self) -> None:
+        for eng in self._engines.values():
+            if eng.loaded:
+                eng.unload()
+            self._status[eng.id] = "idle"
+
+    def unload_all(self) -> None:
+        """Free all TTS VRAM; waits for in-flight synthesis (serialized on the worker)."""
+        if threading.current_thread().name.startswith("tts-worker"):
+            self._unload_all_now()
+        else:
+            self._executor.submit(self._unload_all_now).result(timeout=300)
+
     # -- worker helpers --------------------------------------------------
     async def run(self, fn: Callable, *args) -> Any:
         loop = asyncio.get_running_loop()
@@ -120,9 +156,10 @@ class TTSManager:
 
     async def load_engine(self, engine_id: str, variant: str | None = None) -> None:
         eng = self.engine(engine_id)
+        await self._claim_gpu()
         self._status[engine_id] = "loading"
         try:
-            await self.run(eng.load, variant)
+            await self.run(lambda: (self._single_engine(eng), eng.load(variant)))
             self._status[engine_id] = "ready"
         except Exception as e:
             self._status[engine_id] = f"error: {e}"
@@ -137,9 +174,10 @@ class TTSManager:
     async def prepare_voice(self, voice: Voice, language: str | None = None) -> None:
         eng = self.engine(voice.engine)
         ctx = self.voice_context(voice, language)
+        await self._claim_gpu()
         self._status[voice.engine] = "loading"
         try:
-            await self.run(eng.prepare_voice, ctx)
+            await self.run(lambda: (self._single_engine(eng), eng.prepare_voice(ctx)))
             self._status[voice.engine] = "ready"
         except Exception as e:
             self._status[voice.engine] = f"error: {e}"
@@ -155,6 +193,7 @@ class TTSManager:
         """Stream (audio, sample_rate) chunks for ``text`` from the worker thread."""
         eng = self.engine(voice.engine)
         ctx = self.voice_context(voice, language)
+        await self._claim_gpu()
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -166,6 +205,7 @@ class TTSManager:
                 put(_END)
                 return
             try:
+                self._single_engine(eng)
                 self._status[eng.id] = "busy"
                 for audio, sr in eng.synthesize_stream(text, ctx, cancel):
                     if cancel.cancelled:

@@ -69,6 +69,8 @@ class SeedVCModel:
         self.ready = False
         self.prompt = None  # (prompt_condition, mel2, style2)
         self.prompt_key: tuple | None = None
+        self.dit_key: str | None = None  # fine-tuned checkpoint currently applied (None = base)
+        self._base_state: dict | None = None
 
     def _import_path(self) -> None:
         if not (self.root / "modules").is_dir():
@@ -140,7 +142,8 @@ class SeedVCModel:
             w2v = Wav2Vec2Model.from_pretrained(tok["name"])
         w2v.encoder.layers = w2v.encoder.layers[: tok["output_layer"]]
         w2v = w2v.to(dev).eval()
-        half = dev.type == "cuda"
+        # GTX 16-series cards misbehave in half precision; honour fp32 there.
+        half = self.fp16 and dev.type == "cuda"
         if half:
             w2v = w2v.half()
 
@@ -169,12 +172,43 @@ class SeedVCModel:
         self.ready = True
         log.info("Seed-VC loaded on %s (fp16=%s, random_init=%s)", dev, self.fp16, random_init)
 
+    def set_dit_weights(self, path: str | None) -> None:
+        """Switch the diffusion model between the base weights and a per-voice fine-tune.
+
+        Only the DiT/length-regulator weights differ (~100 MB), so this is fast;
+        the base weights are kept on the CPU to switch back.
+        """
+        import torch
+
+        key = str(path) if path else None
+        if key == self.dit_key:
+            return
+        if self._base_state is None:
+            self._base_state = {k: {n: t.detach().cpu().clone() for n, t in self.model[k].state_dict().items()}
+                                for k in self.model}
+        if key is None:
+            state = self._base_state
+        else:
+            params = torch.load(key, map_location="cpu")["net"]
+            state = {}
+            for k in self.model:
+                if k not in params:
+                    continue
+                current = self.model[k].state_dict()
+                cleaned = {n[len("module."):] if n.startswith("module.") else n: v for n, v in params[k].items()}
+                state[k] = {n: v for n, v in cleaned.items() if n in current and v.shape == current[n].shape}
+        for k, sd in state.items():
+            self.model[k].load_state_dict(sd, strict=False)
+        self.dit_key = key
+        self.prompt = None  # prompt condition depends on the length regulator
+        log.info("Seed-VC weights: %s", key or "base")
+
     def set_reference(self, wav_path: str, max_prompt_length: float) -> None:
         import librosa
         import torch
         import torchaudio
 
-        key = (str(wav_path), float(max_prompt_length), os.path.getmtime(wav_path))
+        key = (str(wav_path), float(max_prompt_length), os.path.getmtime(wav_path), self.dit_key)
         if self.prompt is not None and self.prompt_key == key:
             return
         ref, _ = librosa.load(wav_path, sr=self.sr)
@@ -311,3 +345,47 @@ class StreamingConverter:
         wav[: self.sola_buffer_frame] += self.sola_buf * self.fade_out
         self.sola_buf[:] = wav[self.block: self.block + self.sola_buffer_frame]
         return wav[: self.block].clamp(-1.0, 1.0).cpu().numpy().astype(np.float32)
+
+
+def synthetic_voice(seconds: float, sr: int) -> np.ndarray:
+    """Continuously voiced test signal (benchmarks must never hit the silence gate)."""
+    t = np.arange(int(seconds * sr)) / sr
+    f0 = 130 + 25 * np.sin(2 * np.pi * 0.8 * t)
+    phase = 2 * np.pi * np.cumsum(f0) / sr
+    sig = sum(np.sin(k * phase) / k for k in range(1, 10))
+    env = 0.6 + 0.4 * np.abs(np.sin(2 * np.pi * 2.5 * t))
+    return (0.25 * sig * env).astype(np.float32)
+
+
+def benchmark(model: SeedVCModel, sample_rate: int, settings: StreamSettings, blocks: int = 6) -> dict:
+    """Median per-block inference time for these settings on this GPU (reference must be set)."""
+    conv = StreamingConverter(model, sample_rate, settings)
+    src = synthetic_voice((blocks + 1) * conv.block / sample_rate + 0.1, sample_rate)
+    times = []
+    for i in range(blocks + 1):
+        conv.process(src[i * conv.block:(i + 1) * conv.block])
+        if i > 0:  # first block includes warm-up
+            times.append(conv.last_infer_ms)
+    block_ms = 1000 * conv.block / sample_rate
+    infer = float(np.median(times))
+    return {"infer_ms": round(infer, 1), "block_ms": round(block_ms, 1), "load": round(infer / block_ms, 3),
+            "latency_ms": round(conv.latency_ms, 1)}
+
+
+def convert_file(model: SeedVCModel, in_path: str, out_path: str, settings: StreamSettings,
+                 sample_rate: int = 48000) -> float:
+    """Offline conversion through the same streaming path the live changer uses."""
+    import soundfile as sf
+
+    from ..audio.resample import resample
+
+    audio, sr = sf.read(in_path, dtype="float32", always_2d=True)
+    audio = resample(audio.mean(axis=1), sr, sample_rate)
+    conv = StreamingConverter(model, sample_rate, settings)
+    lag = 2 * conv.block + conv.extra_right  # output trails input by about this much
+    padded = np.concatenate([audio, np.zeros(lag + conv.block, np.float32)])
+    n = (padded.size // conv.block) * conv.block
+    out = np.concatenate([conv.process(padded[i:i + conv.block]) for i in range(0, n, conv.block)])
+    out = out[conv.block:conv.block + audio.size]  # drop the start-up delay
+    sf.write(out_path, out, sample_rate)
+    return out.size / sample_rate

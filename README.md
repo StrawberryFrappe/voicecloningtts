@@ -110,6 +110,50 @@ Tips:
 - The changer keeps your intonation and accent and swaps the timbre. Pitch differences carry over, so a deep voice
   converted to a high voice can sound unnatural.
 
+### Fine-tuning a voice for the voice changer
+
+Zero-shot conversion already works from the voice's reference clip. Fine-tuning trains Seed-VC on more audio of that
+person, so the live voice changer sounds closer to them. It doesn't affect TTS.
+
+1. **Voices** → a voice → **Fine-tune**.
+2. **+ Add training audio**: mp3, mp4 or wav of that person speaking.
+   - Long recordings are split at pauses into 3-12 s clips automatically.
+   - Aim for 1-5 minutes of clean speech. Even 30 seconds helps.
+3. Pick the number of steps, then press **Fine-tune**.
+   - The default is 200 on 4 GB cards and 500 on bigger ones.
+   - Progress, loss and an ETA appear on the card.
+   - The GPU is reserved while it trains, so TTS and the voice changer wait.
+4. When it finishes, the voice shows **fine-tuned ✓**.
+   - The voice changer uses the fine-tuned model automatically. You can switch it off per voice.
+   - **🎧 Compare** records 5 s of you and plays it converted with the base model, then with the fine-tuned one.
+   - The fine-tuned model (about 100 MB) and the training clips are saved with the voice and included in
+     `.voice.zip` exports.
+
+### Low-end GPUs (GTX 1650 and other 4 GB cards)
+
+The app detects the GPU at startup. You can override what it picks under **Settings → GPU**.
+
+- **Low-VRAM mode** turns on automatically under 6 GB. Only one heavy model sits on the GPU at a time.
+  - If the voice changer is live and a chat reply needs speaking, the changer pauses. The reply plays, and the
+    changer comes back on its own. Each swap costs a few seconds of loading.
+  - Whisper (the Record button) runs on the CPU, using the `small` model.
+- **fp32 precision** is used automatically on GTX 16-series and older cards, which produce glitches or silence in
+  half precision.
+- **Voice changer presets:**
+
+  | Preset | Latency | Notes |
+  | --- | --- | --- |
+  | Quality | ~520 ms | |
+  | Balanced | ~380 ms | |
+  | Low-end GPU | ~620 ms | The default on 4 GB cards |
+  | Minimal | ~920 ms | |
+
+  Each latency is the algorithm's delay, plus about 100 ms from the devices. Press **⚡ Auto-tune** to measure your
+  GPU and pick the best preset that keeps up (under 75% load).
+- Expect the Low-end preset to run live on a GTX 1650. Fine-tuning 200 steps should take roughly 10-25 minutes there;
+  the card shows a measured ETA.
+- Close games and video playback while using the voice changer, since they compete for the same GPU.
+
 ### Preview playback
 
 If the virtual mic isn't running, the voice plays inside the app window. You can change this under Settings →
@@ -187,6 +231,8 @@ powershell -File scripts\dev.ps1                   # backend :8765 with reload +
 | "PyTorch can't see the GPU" | Re-run setup. Check `nvidia-smi` and update the NVIDIA driver |
 | Whisper fails on GPU | It falls back to CPU automatically. Set Settings → Speech-to-text → Run on: CPU |
 | Headphone recording missing | `pip install PyAudioWPatch` (the setup script installs it) |
+| Voice changer choppy on a 4 GB card | Press **Auto-tune**, or pick *Low-end GPU*; check Settings → GPU shows fp32 |
+| Fine-tune fails with out of memory | Close other GPU apps and restart the app (batch size is already 1 in low-VRAM mode) |
 | Voice changer choppy | Raise *Block size*, lower *Quality*, set *CFG rate* to 0, close GPU-heavy apps |
 | Voice changer silent | Lower *Silence gate* (try -60 dB) and check the Mic meter moves |
 | Logs | `%APPDATA%\VoiceCloningTTS\logs\vctts.log` |

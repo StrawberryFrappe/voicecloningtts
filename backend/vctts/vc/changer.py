@@ -64,6 +64,29 @@ class VCError(RuntimeError):
     pass
 
 
+def spawn_vc_process(module: str, args: list[str] | None = None, python: Path | None = None,
+                     extra_env: dict | None = None, stdin: bool = True) -> subprocess.Popen:
+    """Start ``python -m <module>`` in the voice-changer environment (Seed-VC on path)."""
+    py = python or vc_python() or Path(sys.executable)
+    root = seedvc_root()
+    env = dict(os.environ)
+    env.update(extra_env or {})
+    env["PYTHONPATH"] = str(REPO_ROOT / "backend") + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONUNBUFFERED"] = "1"
+    env["VCTTS_SEEDVC_DIR"] = str(root)
+    env.setdefault("TQDM_DISABLE", "1")
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    log.info("starting %s with %s", module, py)
+    return subprocess.Popen(
+        [str(py), "-m", module, *(args or [])],
+        stdin=subprocess.PIPE if stdin else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", bufsize=1, env=env,
+        cwd=str(root) if root.is_dir() else None, **kwargs,
+    )
+
+
 class VCWorkerClient:
     """Owns the worker subprocess and does synchronous request/response calls."""
 
@@ -79,24 +102,7 @@ class VCWorkerClient:
         return self._proc is not None and self._proc.poll() is None
 
     def _start(self) -> subprocess.Popen:
-        py = self._python or vc_python() or Path(sys.executable)
-        root = seedvc_root()
-        env = dict(os.environ)
-        env.update(self._extra_env)
-        env["PYTHONPATH"] = str(REPO_ROOT / "backend") + os.pathsep + env.get("PYTHONPATH", "")
-        env["PYTHONUNBUFFERED"] = "1"
-        env["VCTTS_SEEDVC_DIR"] = str(root)
-        env.setdefault("TQDM_DISABLE", "1")
-        kwargs: dict = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-        log.info("starting voice-changer worker with %s", py)
-        proc = subprocess.Popen(
-            [str(py), "-m", "vctts.vc.worker"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", bufsize=1, env=env,
-            cwd=str(root) if root.is_dir() else None, **kwargs,
-        )
+        proc = spawn_vc_process("vctts.vc.worker", python=self._python, extra_env=self._extra_env)
         threading.Thread(target=self._pump_stderr, args=(proc,), daemon=True).start()
         hello = self._read(proc)
         if not hello.get("ready"):
@@ -163,6 +169,8 @@ class VoiceChanger:
         self.client = client or VCWorkerClient()
         self.settings = StreamSettings()
         self.device = "auto"
+        self.precision = "auto"  # "fp16" | "fp32" | "auto" (resolved by vctts.gpu)
+        self.checkpoint: Path | None = None  # per-voice fine-tuned weights in use
         self.state = "off"  # off | loading | live | error
         self.error: str | None = None
         self.voice_id: str | None = None
@@ -210,6 +218,8 @@ class VoiceChanger:
             "active": self._active,
             "error": self.error,
             "voice_id": self.voice_id,
+            "finetuned": self.checkpoint is not None,
+            "precision": self.precision,
             "model_loaded": self._loaded,
             "settings": self.settings.to_dict(),
             "device": self.device,
@@ -228,7 +238,7 @@ class VoiceChanger:
             pass
 
     def start(self, reference_path: Path, voice_id: str, sample_rate: int,
-              settings: StreamSettings | None = None) -> None:
+              settings: StreamSettings | None = None, checkpoint: Path | None = None) -> None:
         """Begin converting (model loading happens on a background thread)."""
         ok, reason = availability()
         if not ok:
@@ -237,6 +247,7 @@ class VoiceChanger:
         if settings is not None:
             self.settings = settings
         self.voice_id = voice_id
+        self.checkpoint = Path(checkpoint) if checkpoint else None
         self._sr = int(sample_rate)
         self._gen += 1
         self._stop = threading.Event()
@@ -274,13 +285,14 @@ class VoiceChanger:
         current = lambda: gen == self._gen and not stop.is_set()  # noqa: E731
         try:
             if not self._loaded or not getattr(self.client, "alive", True):
-                resp = self.client.call("load", device=self.device)
+                resp = self.client.call("load", device=self.device, precision=self.precision)
                 self._loaded = True
                 log.info("voice changer model loaded on %s", resp.get("device"))
             if not current():
                 return
             resp = self.client.call("configure", sample_rate=self._sr, reference_path=str(reference),
-                                    settings=self.settings.to_dict())
+                                    settings=self.settings.to_dict(),
+                                    checkpoint=str(self.checkpoint) if self.checkpoint else None)
             if not current():
                 return
             self._block = int(resp["block_frames"])
@@ -317,3 +329,59 @@ class VoiceChanger:
             self.state = "error"
             self._active = False
             self._emit()
+
+
+    # -- offline helpers (voice changer must not be live) ------------------
+    def _ensure_loaded(self) -> None:
+        if self._active:
+            raise VCError("Stop the voice changer first.")
+        if not self._loaded or not getattr(self.client, "alive", True):
+            self.client.call("load", device=self.device, precision=self.precision)
+            self._loaded = True
+
+    def benchmark(self, reference_path: Path, sample_rate: int, settings: StreamSettings,
+                  checkpoint: Path | None = None, **extra) -> dict:
+        """Measure inference time per block for ``settings`` on this machine."""
+        self._ensure_loaded()
+        return self.client.call("benchmark", sample_rate=sample_rate, reference_path=str(reference_path),
+                                settings=settings.to_dict(), checkpoint=str(checkpoint) if checkpoint else None,
+                                **extra)
+
+    def convert_file(self, reference_path: Path, input_path: Path, output_path: Path,
+                     checkpoint: Path | None = None, settings: StreamSettings | None = None) -> dict:
+        self._ensure_loaded()
+        return self.client.call("convert_file", reference_path=str(reference_path), input_path=str(input_path),
+                                output_path=str(output_path), checkpoint=str(checkpoint) if checkpoint else None,
+                                settings=(settings or self.settings).to_dict())
+
+
+PRESETS: dict[str, dict] = {
+    # Ordered best → cheapest; auto-tune walks this list.
+    "quality": {"label": "Quality", "block_time": 0.25, "diffusion_steps": 12, "inference_cfg_rate": 0.7,
+                "max_prompt_length": 5.0, "extra_time_ce": 2.5, "extra_time": 0.5},
+    "balanced": {"label": "Balanced", "block_time": 0.18, "diffusion_steps": 8, "inference_cfg_rate": 0.7,
+                 "max_prompt_length": 3.0, "extra_time_ce": 2.5, "extra_time": 0.5},
+    "low": {"label": "Low-end GPU", "block_time": 0.30, "diffusion_steps": 4, "inference_cfg_rate": 0.0,
+            "max_prompt_length": 3.0, "extra_time_ce": 2.0, "extra_time": 0.5},
+    "minimal": {"label": "Minimal", "block_time": 0.45, "diffusion_steps": 3, "inference_cfg_rate": 0.0,
+                "max_prompt_length": 2.0, "extra_time_ce": 1.5, "extra_time": 0.5},
+}
+AUTOTUNE_MAX_LOAD = 0.75
+
+
+def preset_settings(name: str, base: StreamSettings | None = None) -> StreamSettings:
+    values = {k: v for k, v in PRESETS[name].items() if k != "label"}
+    return StreamSettings.from_dict({**(base or StreamSettings()).to_dict(), **values})
+
+
+def autotune(measure: Callable[[StreamSettings], dict], base: StreamSettings | None = None) -> dict:
+    """Pick the best preset whose measured load stays under AUTOTUNE_MAX_LOAD."""
+    tried = []
+    for name in PRESETS:
+        settings = preset_settings(name, base)
+        result = measure(settings)
+        tried.append({"preset": name, **result})
+        if result["load"] <= AUTOTUNE_MAX_LOAD:
+            return {"preset": name, "settings": settings.to_dict(), "tried": tried, "ok": True}
+    # Nothing keeps up: return the cheapest so the user gets the least-bad option.
+    return {"preset": name, "settings": settings.to_dict(), "tried": tried, "ok": False}

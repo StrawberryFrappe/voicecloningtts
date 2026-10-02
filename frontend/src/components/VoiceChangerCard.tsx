@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type VCSettings, type VCStatus, type Voice } from "../api";
+import { api, type Preset, type VCSettings, type VCStatus, type Voice } from "../api";
 import { useEvents } from "../events";
 import { errMsg, useToast } from "../toast";
 
@@ -17,6 +17,9 @@ export default function VoiceChangerCard({ voices, audioRunning, hasMic }: { voi
   const [st, setSt] = useState<VCStatus | null>(null);
   const [draft, setDraft] = useState<VCSettings | null>(null);
   const [voiceId, setVoiceId] = useState<string>("");
+  const [presets, setPresets] = useState<{ presets: Record<string, Preset>; recommended: string } | null>(null);
+  const [tuning, setTuning] = useState(false);
+  const [tuneResult, setTuneResult] = useState<string | null>(null);
   const toast = useToast();
 
   useEffect(() => {
@@ -25,6 +28,7 @@ export default function VoiceChangerCard({ voices, audioRunning, hasMic }: { voi
       setDraft(s.settings);
       setVoiceId(s.voice_id || s.saved_voice_id || voices[0]?.id || "");
     }).catch(() => {});
+    api.vcPresets().then(setPresets).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -32,10 +36,38 @@ export default function VoiceChangerCard({ voices, audioRunning, hasMic }: { voi
     if (e.type === "vc") setSt((prev) => ({ ...(prev as VCStatus), ...(e as unknown as VCStatus) }));
   });
 
+  async function applyPreset(name: string) {
+    const p = presets?.presets[name];
+    if (!p) return;
+    setDraft(p.settings);
+    await apply(p.settings);
+  }
+
+  async function autoTune() {
+    setTuning(true);
+    setTuneResult(null);
+    try {
+      const r = await api.vcAutotune(voiceId || null);
+      setSt(r.status);
+      setDraft(r.status.settings);
+      const label = (n: string) => presets?.presets[n]?.label ?? n;
+      const parts = r.tried.map((t) => `${label(t.preset)} ${Math.round(t.load * 100)}%`);
+      setTuneResult(r.ok
+        ? `Picked ${label(r.preset)} (${parts.join(", ")} load).`
+        : `Even the lightest preset can't keep up on this GPU (${parts.join(", ")}). Expect glitches; close other GPU apps.`);
+    } catch (e) {
+      toast(errMsg(e), "error");
+    } finally {
+      setTuning(false);
+    }
+  }
+
   if (!st || !draft) return null;
   const live = st.state === "live";
   const busy = st.state === "loading";
   const overloaded = live && st.load > 0.95;
+  const voice = voices.find((v) => v.id === voiceId);
+  const willUseFinetune = !!voice?.vc_finetune && voice.vc_use_finetune;
 
   async function start() {
     try {
@@ -89,6 +121,26 @@ export default function VoiceChangerCard({ voices, audioRunning, hasMic }: { voi
           <button className="btn sm ghost" onClick={async () => setSt(await api.vcUnload())} title="Free GPU memory">Unload model</button>
         )}
       </div>
+      <div className="row small" style={{ marginTop: 10 }}>
+        <span className="muted">Preset:</span>
+        {presets && Object.entries(presets.presets).map(([name, p]) => (
+          <button key={name} className="btn sm" disabled={busy} onClick={() => applyPreset(name)}
+            title={`${p.settings.diffusion_steps} steps, ${p.settings.block_time}s blocks`}>
+            {p.label} <span className="muted">~{p.latency_ms} ms</span>
+            {presets.recommended === name && " ★"}
+          </button>
+        ))}
+        <button className="btn sm primary" disabled={!st.available || live || busy || tuning || !voiceId} onClick={autoTune}
+          title="Measures this GPU and picks the best preset that keeps up (voice changer must be stopped)">
+          {tuning ? "Measuring…" : "⚡ Auto-tune"}
+        </button>
+      </div>
+      {tuneResult && <p className="small muted">{tuneResult}</p>}
+      <div className="row small muted" style={{ marginTop: 4 }}>
+        {willUseFinetune && <span className="badge accent">uses fine-tuned model</span>}
+        {st.precision && st.precision !== "auto" && <span className="badge">{st.precision}</span>}
+      </div>
+
       {(!audioRunning || !hasMic) && st.available && (
         <p className="small muted">Pick your microphone and start the virtual mic above to enable the voice changer.</p>
       )}

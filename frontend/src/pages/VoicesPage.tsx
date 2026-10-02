@@ -3,6 +3,7 @@ import { api, LANGUAGE_NAMES, type EngineInfo, type SettingSpec, type Voice } fr
 import { player } from "../events";
 import { errMsg, useToast } from "../toast";
 import Waveform from "../components/Waveform";
+import FineTunePanel from "../components/FineTunePanel";
 
 interface Upload { upload_id: string; filename: string; duration: number; peaks: number[] }
 
@@ -184,6 +185,7 @@ function VoiceCard({ voice, active, engines, editing, onEdit, onChange }: {
 }) {
   const [previewText, setPreviewText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showTune, setShowTune] = useState(false);
   const toast = useToast();
 
   async function preview(throughMic: boolean) {
@@ -199,7 +201,7 @@ function VoiceCard({ voice, active, engines, editing, onEdit, onChange }: {
   }
 
   return (
-    <div className={`card ${active ? "voice-card active" : ""}`}>
+    <div className={`card ${active ? "active-voice" : ""}`}>
       <div className="voice-card">
         <div className="col" style={{ gap: 4 }}>
           <div className="row">
@@ -208,12 +210,17 @@ function VoiceCard({ voice, active, engines, editing, onEdit, onChange }: {
             <span className="badge">{LANGUAGE_NAMES[voice.language] ?? voice.language}</span>
             <span className="badge">{engines.find((e) => e.id === voice.engine)?.name ?? voice.engine}</span>
             <span className="small muted">{voice.duration.toFixed(1)}s reference</span>
+            {voice.vc_finetune && <span className="badge accent" title="Voice changer fine-tuned">fine-tuned</span>}
           </div>
         </div>
         <div className="row">
           {!active && <button className="btn sm" onClick={async () => { await api.setActiveVoice(voice.id); onChange(); }}>Use</button>}
           <button className="btn sm" onClick={() => void new Audio(`/api/voices/${voice.id}/reference`).play()}>Reference</button>
           <button className="btn sm" onClick={onEdit}>{editing ? "Close" : "Edit"}</button>
+          <button className="btn sm" onClick={() => setShowTune(!showTune)}
+            title="Train the real-time voice changer on more audio of this voice">
+            {showTune ? "Close fine-tune" : "Fine-tune"}
+          </button>
           <a className="btn sm" href={`/api/voices/${voice.id}/export`} download>Export</a>
           <button className="btn sm danger" onClick={async () => {
             if (!confirm(`Delete voice "${voice.name}"?`)) return;
@@ -229,6 +236,7 @@ function VoiceCard({ voice, active, engines, editing, onEdit, onChange }: {
         <button className="btn sm" disabled={busy} onClick={() => preview(true)} title="Play through the virtual mic / monitor">🎚️ Through mic</button>
       </div>
       {editing && <VoiceEditor voice={voice} engines={engines} onSaved={onChange} />}
+      {showTune && <FineTunePanel voice={voice} onChange={onChange} />}
     </div>
   );
 }

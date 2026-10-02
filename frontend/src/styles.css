@@ -130,7 +130,7 @@ button.btn.rec.active { background: var(--bad); color: white; border-color: var(
 .wave .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--warn); pointer-events: none; }
 
 .voice-card { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
-.voice-card.active { border-color: var(--accent); }
+.card.active-voice { border-color: var(--accent); }
 .badge { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
 .badge.accent { color: var(--accent); border-color: #3a4380; }
 

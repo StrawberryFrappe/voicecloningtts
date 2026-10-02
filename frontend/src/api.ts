@@ -73,7 +73,39 @@ export interface Voice {
   source_filename: string | null;
   notes: string;
   created_at: number;
+  vc_finetune: { steps: number; clips?: number; seconds?: number; trained_at?: number } | null;
+  vc_use_finetune: boolean;
 }
+
+export interface GpuStatus {
+  cuda: boolean;
+  name: string;
+  vram_gb: number;
+  cc: string | null;
+  low_vram: boolean;
+  precision: "fp16" | "fp32";
+  memory_mode: "auto" | "low" | "normal";
+  precision_pref: "auto" | "fp16" | "fp32";
+  holders: string[];
+  exclusive: string | null;
+}
+
+export interface TrainingClip { name: string; seconds: number; removable: boolean }
+
+export interface TrainStatus {
+  state: "idle" | "starting" | "running" | "cancelling" | "done" | "error" | "cancelled";
+  voice_id?: string;
+  step?: number;
+  max_steps?: number;
+  batch_size?: number;
+  loss?: number | null;
+  eta_s?: number | null;
+  message?: string;
+  error?: string | null;
+  defaults: { steps: number; batch_size: number; min_steps: number; max_steps: number };
+}
+
+export interface Preset { label: string; settings: VCSettings; latency_ms: number }
 
 export interface SettingSpec {
   key: string;
@@ -151,6 +183,8 @@ export interface AppStatus {
   stt: { available: boolean; reason: string; device: string | null };
   loopback: { available: boolean; reason: string };
   vc: VCStatus;
+  gpu: GpuStatus;
+  training: TrainStatus;
   busy: boolean;
 }
 
@@ -176,6 +210,8 @@ export interface VCStatus {
   voice_id: string | null;
   saved_voice_id?: string | null;
   model_loaded: boolean;
+  finetuned?: boolean;
+  precision?: string;
   settings: VCSettings;
   device: string;
   latency_ms: number;
@@ -197,6 +233,8 @@ export interface Settings {
   auto_start_audio: boolean;
   record_source: "mic" | "loopback";
   record_device: string;
+  gpu_memory_mode: "auto" | "low" | "normal";
+  gpu_precision: "auto" | "fp16" | "fp32";
 }
 
 export interface Overrides {
@@ -333,6 +371,25 @@ export const api = {
   vcStart: (voice_id?: string | null) => post<VCStatus>("/api/vc/start", { voice_id: voice_id ?? null }),
   vcStop: () => post<VCStatus>("/api/vc/stop"),
   vcUnload: () => post<VCStatus>("/api/vc/unload"),
+  vcPresets: () => get<{ presets: Record<string, Preset>; recommended: string }>("/api/vc/presets"),
+  vcAutotune: (voice_id?: string | null) =>
+    post<{ preset: string; ok: boolean; tried: { preset: string; infer_ms: number; block_ms: number; load: number }[]; status: VCStatus }>(
+      "/api/vc/autotune", { voice_id: voice_id ?? null }),
+
+  gpu: () => get<GpuStatus>("/api/gpu"),
+  trainingClips: (vid: string) => get<{ clips: TrainingClip[]; seconds: number }>(`/api/voices/${vid}/training`),
+  addTraining: (vid: string, upload_id: string) =>
+    post<{ clips: TrainingClip[]; seconds: number }>(`/api/voices/${vid}/training`, { upload_id }),
+  deleteTraining: (vid: string, name: string) =>
+    del<{ clips: TrainingClip[]; seconds: number }>(`/api/voices/${vid}/training/${encodeURIComponent(name)}`),
+  startFinetune: (vid: string, steps: number, batch_size?: number) =>
+    post<TrainStatus>(`/api/voices/${vid}/finetune`, { steps, batch_size: batch_size ?? null }),
+  deleteFinetune: (vid: string) => del<Voice>(`/api/voices/${vid}/finetune`),
+  trainStatus: () => get<TrainStatus>("/api/vc/train"),
+  cancelTrain: () => post<TrainStatus>("/api/vc/train/cancel"),
+  compareFinetune: (vid: string, recording_id: string) =>
+    post<{ base_wav_b64: string; finetuned_wav_b64: string }>(`/api/voices/${vid}/finetune/compare`, { recording_id }),
+  recordStopRaw: () => post<{ recording_id: string; duration: number }>("/api/record/stop", { transcribe: false }),
 };
 
 export const LANGUAGE_NAMES: Record<string, string> = {

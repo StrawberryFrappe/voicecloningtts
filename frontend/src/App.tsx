@@ -47,6 +47,10 @@ function Shell() {
   useEvents((e) => {
     if (e.type === "engine") void refresh();
     if (e.type === "vc") setVcState(e.state);
+    if (e.type === "gpu_swap") {
+      const names: Record<string, string> = { tts: "TTS voice", vc: "voice changer", stt: "speech-to-text", train: "fine-tuning" };
+      toast(`Low-VRAM: swapped ${e.evicted.map((x: string) => names[x] ?? x).join(", ")} out for ${names[e.acquired] ?? e.acquired}`, "warn");
+    }
     if (e.type === "speaking") setSpeaking(!!e.active);
     if (e.type === "tts_start") setSpeaking(true);
     if (e.type === "tts_done" || e.type === "stopped") setSpeaking(false);
