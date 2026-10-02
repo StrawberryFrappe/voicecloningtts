@@ -758,6 +758,31 @@ def create_app(state: AppState | None = None) -> FastAPI:
         return {"base_wav_b64": base64.b64encode(out_base.read_bytes()).decode("ascii"),
                 "finetuned_wav_b64": base64.b64encode(out_ft.read_bytes()).decode("ascii")}
 
+    # -- self-check ---------------------------------------------------------------
+    doctor_state: dict = {"running": False, "last": None}
+
+    @app.post("/api/doctor")
+    async def doctor(body: dict | None = Body(None)):
+        from .doctor import Doctor
+
+        s = S()
+        if doctor_state["running"]:
+            raise HTTPException(409, "A self-check is already running.")
+        deep = bool((body or {}).get("deep"))
+        doctor_state["running"] = True
+        await s.bus.publish({"type": "doctor_start", "deep": deep})
+        try:
+            rep = await Doctor(s, on_result=lambda c: s.bus.publish_nowait({"type": "doctor", "check": c})).run(deep)
+        finally:
+            doctor_state["running"] = False
+        doctor_state["last"] = rep
+        await s.bus.publish({"type": "doctor_done", "summary": rep["summary"]})
+        return rep
+
+    @app.get("/api/doctor/last")
+    async def doctor_last():
+        return {"running": doctor_state["running"], "report": doctor_state["last"]}
+
     # -- GPU -------------------------------------------------------------------
     @app.get("/api/gpu")
     async def gpu_status():

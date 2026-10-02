@@ -245,6 +245,27 @@ export interface Overrides {
   model?: string | null;
 }
 
+export interface DoctorCheck {
+  id: string;
+  title: string;
+  status: "ok" | "warn" | "fail" | "skip";
+  detail: string;
+  fix: string;
+  seconds: number;
+  data?: Record<string, any>;
+}
+
+export interface DoctorReport {
+  version: string;
+  created_at: string;
+  deep: boolean;
+  duration_s: number;
+  summary: { ok: number; warn: number; fail: number; skip: number };
+  checks: DoctorCheck[];
+  text: string;
+  saved_to: string | null;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -377,6 +398,8 @@ export const api = {
       "/api/vc/autotune", { voice_id: voice_id ?? null }),
 
   gpu: () => get<GpuStatus>("/api/gpu"),
+  doctor: (deep: boolean) => post<DoctorReport>("/api/doctor", { deep }),
+  doctorLast: () => get<{ running: boolean; report: DoctorReport | null }>("/api/doctor/last"),
   trainingClips: (vid: string) => get<{ clips: TrainingClip[]; seconds: number }>(`/api/voices/${vid}/training`),
   addTraining: (vid: string, upload_id: string) =>
     post<{ clips: TrainingClip[]; seconds: number }>(`/api/voices/${vid}/training`, { upload_id }),

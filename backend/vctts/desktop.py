@@ -54,7 +54,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=int(os.environ.get("VCTTS_PORT", "8765")))
     parser.add_argument("--browser", action="store_true", help="open in the default browser instead of a window")
     parser.add_argument("--server-only", action="store_true", help="run the API server without a UI")
+    parser.add_argument("--doctor", action="store_true", help="run the self-check and print a report")
+    parser.add_argument("--deep", action="store_true", help="with --doctor: also load models and measure speed")
     args = parser.parse_args(argv)
+
+    if args.doctor:
+        import asyncio
+
+        from .doctor import run_cli
+
+        logging.basicConfig(level=logging.WARNING)
+        sys.exit(asyncio.run(run_cli(deep=args.deep)))
 
     _setup_logging()
     import uvicorn

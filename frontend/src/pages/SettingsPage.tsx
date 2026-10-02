@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type AppStatus, type GpuStatus, type Provider, type Settings } from "../api";
 import { errMsg, useToast } from "../toast";
+import DiagnoseCard from "../components/DiagnoseCard";
 
 const KEY_LINKS: Record<string, string> = {
   openai: "https://platform.openai.com/api-keys",
@@ -44,6 +45,8 @@ export default function SettingsPage({ status, onChange }: { status: AppStatus |
   return (
     <div className="page page-narrow">
       <h1>Settings</h1>
+
+      <DiagnoseCard />
 
       <div className="card">
         <h2>API keys</h2>

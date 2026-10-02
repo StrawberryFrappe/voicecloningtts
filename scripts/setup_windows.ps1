@@ -168,5 +168,11 @@ try {
     $lnk.Save()
 } catch { Write-Host "(could not create shortcut: $_)" }
 
+# --- Self-check ---------------------------------------------------------------------
+Step "Running the self-check"
+& $vpy -m vctts --doctor
+Write-Host "(Problems above? Fix what the arrows suggest, or send the saved report when asking for help.)"
+
 Write-Host "`nDone! Start the app with run.bat (or the desktop shortcut)." -ForegroundColor Green
 Write-Host "The first time you use a voice engine it downloads its model (a few GB)."
+Write-Host "Run doctor.bat --deep (or Settings > Diagnose > Deep check) to download them and measure this PC's speed."

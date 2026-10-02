@@ -75,6 +75,30 @@ model weights from Hugging Face (a few GB).
 5. In Discord, Zoom, OBS and similar apps, set the input device to **`CABLE Output (VB-Audio Virtual Cable)`**.
    In Discord, turn off Krisp noise suppression, or it may cut the voice.
 
+## First run / something broke?
+
+Run the self-check. It tests each part of the install and saves a report you can paste when asking for help. The
+report never includes API keys.
+
+- **Settings → Diagnose → Quick check** takes seconds and downloads nothing. It checks:
+  - the GPU, in each of the three Python environments,
+  - audio devices and VB-Cable,
+  - ffmpeg,
+  - which models are already downloaded,
+  - network access,
+  - API keys.
+- **Deep check** loads the models, downloading them the first time, then:
+  - speaks a test sentence (saved as `logs\doctor-tts.wav`),
+  - measures the voice changer on your GPU,
+  - transcribes the test sentence,
+  - pings your LLM.
+
+  This gives the real speed of your PC. It can take several minutes.
+- If the app window won't open, double-click **`doctor.bat`** (or run `doctor.bat --deep`) for the same checks in a
+  console.
+
+Each ✗ or ⚠ comes with a suggested fix. Reports are saved in `%APPDATA%\VoiceCloningTTS\logs\doctor-*.txt`.
+
 ## Using it
 
 1. **Settings:** paste an API key for at least one provider. Keys are stored in the Windows Credential Manager.
